@@ -74,13 +74,20 @@ const MISTAKE_PENALTY = -65;
 const SORT_POINTS = 110;
 const SNAP_RADIUS = 220;
 const VERTICAL_THROW_RATIO = 0.78;
-const BATCH_HEAD_START_PROGRESS = -0.1;
 const INTRA_BATCH_SPACING_PIXELS = 175;
-const INTER_BATCH_MIN_FRACTION = 0.2;
-const INTER_BATCH_MAX_FRACTION = 0.34;
+const INTER_BATCH_MIN_FRACTION = 0.16;
+const INTER_BATCH_MAX_FRACTION = 0.26;
+const BATCH_LENGTH_DELAY_RATIO = 0.35;
 const BATCH_MEAN = 5;
 const BATCH_STD_DEV = 1.45;
-const BATCH_SIZES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
+const BATCH_SIZES = [1, 2, 3, 4, 5, 6, 7, 8] as const;
+const FEEDER_CLEAR_HEAD_START_PROGRESS = -0.02;
+const FEEDER_OCCUPIED_HEAD_START_PROGRESS = -0.06;
+const FEEDER_CLEAR_THRESHOLD_PROGRESS = 0.12;
+const CARD_BELT_FOOTPRINT_PIXELS = 210;
+const MAX_CARD_OVERLAP_PIXELS = 34;
+const MIN_RENDER_PROGRESS = -1.2;
+const MAX_RENDER_PROGRESS = 1.08;
 
 const SUIT_TO_ZONE: Record<ZoneId, Suit> = {
   north: "hearts",
@@ -184,7 +191,9 @@ export class ConveyorSortGame {
       if (spawnedCount === 0) {
         break;
       }
-      this.batchDistanceRemaining += this.getInterBatchDistance() + (spawnedCount - 1) * INTRA_BATCH_SPACING_PIXELS;
+      this.batchDistanceRemaining +=
+        this.getInterBatchDistance() +
+        (spawnedCount - 1) * this.getIntraBatchSpacingPixels() * BATCH_LENGTH_DELAY_RATIO;
     }
 
     for (const card of cardsToMiss) {
@@ -359,10 +368,13 @@ export class ConveyorSortGame {
       return;
     }
 
+    const headStartProgress = this.getBatchHeadStartProgress();
+    const spacingProgress = this.getIntraBatchSpacingPixels() / this.beltLength;
+
     this.activeCards.set(this.nextCardId, {
       ...next,
       id: this.nextCardId,
-      progress: BATCH_HEAD_START_PROGRESS - (batchIndex * INTRA_BATCH_SPACING_PIXELS) / this.beltLength,
+      progress: headStartProgress - batchIndex * spacingProgress,
       laneOffset: -22 + Math.random() * 44,
       wobblePhase: Math.random() * Math.PI * 2,
       dragging: false,
@@ -370,6 +382,25 @@ export class ConveyorSortGame {
     });
 
     this.nextCardId += 1;
+  }
+
+  private getBatchHeadStartProgress(): number {
+    const nearestProgress = [...this.activeCards.values()].reduce<number | null>((nearest, card) => {
+      if (nearest === null) {
+        return card.progress;
+      }
+      return Math.min(nearest, card.progress);
+    }, null);
+
+    if (nearestProgress === null || nearestProgress > FEEDER_CLEAR_THRESHOLD_PROGRESS) {
+      return FEEDER_CLEAR_HEAD_START_PROGRESS;
+    }
+
+    return FEEDER_OCCUPIED_HEAD_START_PROGRESS;
+  }
+
+  private getIntraBatchSpacingPixels(): number {
+    return Math.max(INTRA_BATCH_SPACING_PIXELS, CARD_BELT_FOOTPRINT_PIXELS - MAX_CARD_OVERLAP_PIXELS);
   }
 
   private getInterBatchDistance(): number {
@@ -412,10 +443,9 @@ export class ConveyorSortGame {
   }
 
   private getBeltPoint(progress: number, laneOffset: number): Point {
-    const clampedProgress = Math.max(-0.12, Math.min(progress, 1.04));
-    const t = (clampedProgress + 0.12) / 1.16;
-    const alongX = this.beltStart.x + (this.beltEnd.x - this.beltStart.x) * t;
-    const alongY = this.beltStart.y + (this.beltEnd.y - this.beltStart.y) * t;
+    const clampedProgress = Math.max(MIN_RENDER_PROGRESS, Math.min(progress, MAX_RENDER_PROGRESS));
+    const alongX = this.beltStart.x + (this.beltEnd.x - this.beltStart.x) * clampedProgress;
+    const alongY = this.beltStart.y + (this.beltEnd.y - this.beltStart.y) * clampedProgress;
     const normal = this.getBeltNormal();
 
     return {
