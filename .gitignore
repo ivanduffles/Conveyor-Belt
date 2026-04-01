@@ -1,0 +1,16 @@
+# OS files
+Thumbs.db
+.DS_Store
+
+# Editor folders
+.vscode/
+.idea/
+
+# Environment files
+.env
+.env.*
+
+# Node and build output
+node_modules/
+dist/
+*.tsbuildinfo
