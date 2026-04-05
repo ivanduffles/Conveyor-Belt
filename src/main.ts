@@ -17,8 +17,8 @@ app.innerHTML = `
     <div class="play-surface">
       <div class="game-frame">
         <div id="game-root" class="game-root"></div>
+        <div id="hud-root" class="hud-root"></div>
       </div>
-      <div id="hud-root" class="hud-root"></div>
     </div>
   </div>
 `;
