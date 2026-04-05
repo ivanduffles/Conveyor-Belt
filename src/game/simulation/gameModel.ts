@@ -1,11 +1,12 @@
-import { createShuffledDeck, type DeckCard, type Suit } from "./cards";
+import { SUITS, createShuffledDeck, type DeckCard, type Suit } from "./cards";
 
 export interface Point {
   x: number;
   y: number;
 }
 
-export type ZoneId = "north" | "east" | "south" | "west";
+export type ZoneId = "west" | "east";
+export type GestureIntent = "west" | "east" | "trash" | "none";
 export type BannerTone = "good" | "warn" | "bad" | "neutral";
 
 export interface ZoneLayout {
@@ -48,7 +49,7 @@ export interface GameSnapshot {
 }
 
 export interface GameEvent {
-  type: "sorted" | "mistake" | "miss";
+  type: "sorted" | "mistake" | "miss" | "trash";
   cardId: number;
   zoneId: ZoneId | null;
   scoreDelta: number;
@@ -64,37 +65,28 @@ interface ActiveCard extends DeckCard {
   dragPosition: Point | null;
 }
 
-const CARD_LIMIT = 18;
-const BASE_BELT_SPEED = 90;
+const CARD_LIMIT = 8;
+const BASE_BELT_SPEED = 72;
 const MAX_BELT_SPEED = BASE_BELT_SPEED * 4;
 const SPEED_STEP_INTERVAL_SECONDS = 10;
 const SPEED_STEP_MULTIPLIER = 0.07;
 const MISS_PENALTY = -25;
 const MISTAKE_PENALTY = -65;
 const SORT_POINTS = 110;
-const SNAP_RADIUS = 220;
-const VERTICAL_THROW_RATIO = 0.78;
 const INTRA_BATCH_SPACING_PIXELS = 175;
 const INTER_BATCH_MIN_FRACTION = 0.16;
 const INTER_BATCH_MAX_FRACTION = 0.26;
 const BATCH_LENGTH_DELAY_RATIO = 0.35;
-const BATCH_MEAN = 5;
+const BATCH_MEAN = 4;
 const BATCH_STD_DEV = 1.45;
 const BATCH_SIZES = [1, 2, 3, 4, 5, 6, 7, 8] as const;
 const FEEDER_CLEAR_HEAD_START_PROGRESS = -0.02;
 const FEEDER_OCCUPIED_HEAD_START_PROGRESS = -0.06;
 const FEEDER_CLEAR_THRESHOLD_PROGRESS = 0.12;
 const CARD_BELT_FOOTPRINT_PIXELS = 210;
-const MAX_CARD_OVERLAP_PIXELS = 34;
+const MAX_CARD_OVERLAP_RATIO = 0.7;
 const MIN_RENDER_PROGRESS = -1.2;
 const MAX_RENDER_PROGRESS = 1.08;
-
-const SUIT_TO_ZONE: Record<ZoneId, Suit> = {
-  north: "hearts",
-  east: "diamonds",
-  south: "spades",
-  west: "clubs"
-};
 
 const ZONE_ACCENTS: Record<Suit, number> = {
   hearts: 0xff6b7d,
@@ -106,16 +98,18 @@ const ZONE_ACCENTS: Record<Suit, number> = {
 export class ConveyorSortGame {
   private readonly width: number;
   private readonly height: number;
-  private readonly screenCenter: Point;
   private readonly beltStart: Point;
   private readonly beltEnd: Point;
   private readonly beltWidth: number;
   private readonly beltLength: number;
-  private readonly zones: ZoneLayout[];
+  private readonly beltCenterX: number;
+  private readonly beltMidpointY: number;
 
+  private zones: ZoneLayout[] = [];
   private activeCards = new Map<number, ActiveCard>();
   private nextCardId = 1;
   private deck: DeckCard[] = [];
+  private enabledSuits: Suit[] = [];
   private batchDistanceRemaining = 0;
   private score = 0;
   private streak = 0;
@@ -132,24 +126,26 @@ export class ConveyorSortGame {
   constructor(width: number, height: number) {
     this.width = width;
     this.height = height;
-    this.screenCenter = { x: width / 2, y: height / 2 };
-    this.beltWidth = Math.min(190, width * 0.22);
-    this.beltStart = { x: width - 110, y: 425 };
-    this.beltEnd = { x: 120, y: height - 117 };
+    this.beltCenterX = width / 2;
+    this.beltWidth = Math.min(236, width * 0.264);
+    this.beltStart = { x: this.beltCenterX, y: 100 };
+    this.beltEnd = { x: this.beltCenterX, y: 1530 };
+    this.beltMidpointY = (this.beltStart.y + this.beltEnd.y) / 2;
     this.beltLength = Math.hypot(this.beltEnd.x - this.beltStart.x, this.beltEnd.y - this.beltStart.y);
-    this.zones = [
-      this.createZone("north", "NORTH", width / 2, 315),
-      this.createZone("east", "EAST", width - 124, height / 2 + 145),
-      this.createZone("south", "SOUTH", width / 2, height - 85),
-      this.createZone("west", "WEST", 124, height / 2 + 145)
-    ];
     this.reset();
   }
 
   reset(): void {
+    const [westSuit, eastSuit] = this.pickZoneSuits();
+
     this.activeCards.clear();
     this.nextCardId = 1;
+    this.enabledSuits = [westSuit, eastSuit];
     this.deck = createShuffledDeck();
+    this.zones = [
+      this.createZone("west", "WEST", 172, this.beltMidpointY, westSuit),
+      this.createZone("east", "EAST", this.width - 172, this.beltMidpointY, eastSuit)
+    ];
     this.batchDistanceRemaining = 0;
     this.score = 0;
     this.streak = 0;
@@ -158,9 +154,9 @@ export class ConveyorSortGame {
     this.mistakes = 0;
     this.elapsedSeconds = 0;
     this.events = [];
-    this.bannerText = "Sort by suit before the belt outruns you.";
+    this.bannerText = `Sort ${this.formatSuitName(westSuit)} west and ${this.formatSuitName(eastSuit)} east. Ignore the other suits.`;
     this.bannerTone = "neutral";
-    this.bannerTimer = 2.4;
+    this.bannerTimer = 2.8;
     this.draggingCardId = null;
   }
 
@@ -201,6 +197,9 @@ export class ConveyorSortGame {
       if (this.draggingCardId === card.id) {
         this.draggingCardId = null;
       }
+      if (!this.enabledSuits.includes(card.suit)) {
+        continue;
+      }
       this.streak = 0;
       this.missed += 1;
       this.score += MISS_PENALTY;
@@ -235,22 +234,39 @@ export class ConveyorSortGame {
     card.dragPosition = { ...pointer };
   }
 
-  endDrag(cardId: number, pointer: Point): void {
+  cancelDrag(cardId: number): void {
     const card = this.activeCards.get(cardId);
     if (!card) {
       return;
     }
 
-    card.dragPosition = { ...pointer };
-    const dropZone = this.findDropZone(pointer);
     card.dragging = false;
     card.dragPosition = null;
-    this.draggingCardId = null;
+    if (this.draggingCardId === card.id) {
+      this.draggingCardId = null;
+    }
+  }
 
-    if (!dropZone) {
+  resolveGesture(cardId: number, intent: GestureIntent): void {
+    if (intent === "none") {
+      this.cancelDrag(cardId);
       return;
     }
 
+    if (intent === "trash") {
+      this.trashCard(cardId);
+      return;
+    }
+
+    const card = this.activeCards.get(cardId);
+    const dropZone = this.getZoneById(intent);
+    if (!card || !dropZone) {
+      return;
+    }
+
+    card.dragging = false;
+    card.dragPosition = null;
+    this.draggingCardId = null;
     this.activeCards.delete(card.id);
     const dropPoint = { ...dropZone.center };
 
@@ -284,6 +300,41 @@ export class ConveyorSortGame {
     this.setBanner("Wrong chute.", "bad", 1.15);
   }
 
+  trashCard(cardId: number): void {
+    const card = this.activeCards.get(cardId);
+    if (!card) {
+      return;
+    }
+
+    this.activeCards.delete(card.id);
+    if (this.draggingCardId === card.id) {
+      this.draggingCardId = null;
+    }
+
+    if (this.enabledSuits.includes(card.suit)) {
+      this.streak = 0;
+      this.missed += 1;
+      this.score += MISS_PENALTY;
+      this.events.push({
+        type: "miss",
+        cardId: card.id,
+        zoneId: null,
+        scoreDelta: MISS_PENALTY,
+        worldPoint: { ...this.beltEnd }
+      });
+      this.setBanner("Trashed a target card.", "warn", 1.2);
+      return;
+    }
+
+    this.events.push({
+      type: "trash",
+      cardId: card.id,
+      zoneId: null,
+      scoreDelta: 0,
+      worldPoint: { ...this.beltEnd }
+    });
+  }
+
   drainEvents(): GameEvent[] {
     const drained = [...this.events];
     this.events.length = 0;
@@ -312,19 +363,14 @@ export class ConveyorSortGame {
     };
   }
 
-  private createZone(id: ZoneId, direction: string, x: number, y: number): ZoneLayout {
-    const suit = SUIT_TO_ZONE[id];
-    const width = id === "east" || id === "west"
-      ? Math.min(248, this.width * 0.276)
-      : Math.min(248, this.width * 0.27);
-
+  private createZone(id: ZoneId, direction: string, x: number, y: number, suit: Suit): ZoneLayout {
     return {
       id,
       direction,
       suit,
       center: { x, y },
-      width,
-      height: Math.min(196, this.height * 0.12),
+      width: Math.min(318, this.width * 0.28),
+      height: Math.min(404, this.height * 0.25),
       accent: ZONE_ACCENTS[suit]
     };
   }
@@ -369,7 +415,7 @@ export class ConveyorSortGame {
     }
 
     const headStartProgress = this.getBatchHeadStartProgress();
-    const spacingProgress = this.getIntraBatchSpacingPixels() / this.beltLength;
+    const spacingProgress = this.getMinimumCardSpacingPixels() / this.beltLength;
 
     this.activeCards.set(this.nextCardId, {
       ...next,
@@ -385,6 +431,7 @@ export class ConveyorSortGame {
   }
 
   private getBatchHeadStartProgress(): number {
+    const minimumGapProgress = this.getMinimumCardSpacingPixels() / this.beltLength;
     const nearestProgress = [...this.activeCards.values()].reduce<number | null>((nearest, card) => {
       if (nearest === null) {
         return card.progress;
@@ -396,11 +443,15 @@ export class ConveyorSortGame {
       return FEEDER_CLEAR_HEAD_START_PROGRESS;
     }
 
-    return FEEDER_OCCUPIED_HEAD_START_PROGRESS;
+    return Math.min(FEEDER_OCCUPIED_HEAD_START_PROGRESS, nearestProgress - minimumGapProgress);
   }
 
   private getIntraBatchSpacingPixels(): number {
-    return Math.max(INTRA_BATCH_SPACING_PIXELS, CARD_BELT_FOOTPRINT_PIXELS - MAX_CARD_OVERLAP_PIXELS);
+    return Math.max(INTRA_BATCH_SPACING_PIXELS, this.getMinimumCardSpacingPixels());
+  }
+
+  private getMinimumCardSpacingPixels(): number {
+    return CARD_BELT_FOOTPRINT_PIXELS * (1 - MAX_CARD_OVERLAP_RATIO);
   }
 
   private getInterBatchDistance(): number {
@@ -464,59 +515,30 @@ export class ConveyorSortGame {
     };
   }
 
-  private findDropZone(point: Point): ZoneLayout | null {
-    const horizontalThrowDistance = Math.min(
-      ...this.zones
-        .filter((zone) => zone.id === "east" || zone.id === "west")
-        .map((zone) => Math.abs(zone.center.x - this.screenCenter.x))
-    );
-
-    const northZone = this.zones.find((zone) => zone.id === "north") ?? null;
-    const southZone = this.zones.find((zone) => zone.id === "south") ?? null;
-
-    const verticalThrowDistance = horizontalThrowDistance * VERTICAL_THROW_RATIO;
-
-    if (
-      northZone &&
-      point.y <= this.screenCenter.y - verticalThrowDistance &&
-      Math.abs(point.x - this.screenCenter.x) <= northZone.width / 2 + 110
-    ) {
-      return northZone;
-    }
-
-    if (
-      southZone &&
-      point.y >= this.screenCenter.y + verticalThrowDistance &&
-      Math.abs(point.x - this.screenCenter.x) <= southZone.width / 2 + 110
-    ) {
-      return southZone;
-    }
-
-    for (const zone of this.zones) {
-      const expandedWidth = zone.width / 2 + 72;
-      const expandedHeight = zone.height / 2 + 60;
-      if (Math.abs(point.x - zone.center.x) <= expandedWidth && Math.abs(point.y - zone.center.y) <= expandedHeight) {
-        return zone;
-      }
-    }
-
-    let bestZone: ZoneLayout | null = null;
-    let bestDistance = Number.POSITIVE_INFINITY;
-
-    for (const zone of this.zones) {
-      const distance = Math.hypot(point.x - zone.center.x, point.y - zone.center.y);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        bestZone = zone;
-      }
-    }
-
-    return bestDistance <= SNAP_RADIUS ? bestZone : null;
-  }
-
   private setBanner(text: string, tone: BannerTone, duration: number): void {
     this.bannerText = text;
     this.bannerTone = tone;
     this.bannerTimer = duration;
+  }
+
+  private getZoneById(zoneId: ZoneId): ZoneLayout | null {
+    return this.zones.find((zone) => zone.id === zoneId) ?? null;
+  }
+
+  private pickZoneSuits(): [Suit, Suit] {
+    const shuffled = [...SUITS];
+
+    for (let index = shuffled.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      const temp = shuffled[index];
+      shuffled[index] = shuffled[swapIndex];
+      shuffled[swapIndex] = temp;
+    }
+
+    return [shuffled[0], shuffled[1]];
+  }
+
+  private formatSuitName(suit: Suit): string {
+    return suit.charAt(0).toUpperCase() + suit.slice(1);
   }
 }

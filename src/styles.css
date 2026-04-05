@@ -1,10 +1,14 @@
 :root {
-  color: #ffffff;
-  background:
+  --page-text: #ffffff;
+  --page-bg:
     radial-gradient(circle at top right, rgba(255, 255, 255, 0.08), transparent 22%),
     radial-gradient(circle at bottom left, rgba(12, 47, 27, 0.34), transparent 26%),
     linear-gradient(145deg, #11341d 0%, #1c5a33 48%, #0f2d18 100%);
-  font-family: "Trebuchet MS", "Gill Sans", sans-serif;
+  --hud-panel: rgba(9, 31, 18, 0.82);
+  --hud-panel-soft: rgba(12, 36, 22, 0.72);
+  --hud-border: rgba(183, 224, 199, 0.2);
+  --hud-shadow: 0 18px 36px rgba(0, 0, 0, 0.32);
+  --hud-text-soft: rgba(255, 255, 255, 0.72);
 }
 
 * {
@@ -21,31 +25,33 @@ body,
 body {
   overflow: hidden;
   overscroll-behavior: none;
+  color: var(--page-text);
+  background: var(--page-bg);
+  font-family: "Trebuchet MS", "Gill Sans", sans-serif;
 }
 
 .app-shell {
-  width: min(100vw - 36px, 1340px);
+  width: 100%;
   min-height: 100vh;
-  margin: 0 auto;
   display: grid;
   place-items: center;
-  padding: 18px 0;
+  padding: 18px 12px;
 }
 
 .play-surface {
   position: relative;
-  width: 100%;
+  width: min(100%, 720px, calc((100vh - 36px) * 990 / 1600));
 }
 
 .game-frame {
   position: relative;
   width: 100%;
-  aspect-ratio: 16 / 9;
-  border-radius: 30px;
+  aspect-ratio: 990 / 1600;
+  border-radius: 34px;
   overflow: hidden;
-  border: 1px solid rgba(148, 195, 228, 0.22);
+  border: 1px solid rgba(148, 195, 228, 0.2);
   box-shadow:
-    0 30px 80px rgba(0, 0, 0, 0.48),
+    0 34px 90px rgba(0, 0, 0, 0.48),
     inset 0 1px 0 rgba(255, 255, 255, 0.06);
   background:
     linear-gradient(180deg, rgba(29, 90, 52, 0.98), rgba(18, 62, 35, 0.96)),
@@ -84,66 +90,74 @@ body {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  overflow: visible;
 }
 
-.hud-topbar {
-  position: absolute;
-  top: max(12px, env(safe-area-inset-top));
-  left: 50%;
-  transform: translateX(-50%);
-  width: min(calc(100% - 24px), 520px);
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-radius: 18px;
-  position: absolute;
-  border: 1px solid rgba(154, 202, 234, 0.18);
-  background: rgba(13, 44, 24, 0.72);
-  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
+.hud-score-wrap,
+.hud-stats,
+.hud-banner {
+  border: 1px solid var(--hud-border);
+  box-shadow: var(--hud-shadow);
   backdrop-filter: blur(16px);
 }
 
-.hud-side-stat {
-  display: grid;
-  gap: 2px;
-  color: rgba(255, 255, 255, 0.82);
-  font-size: 12px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.hud-side-stat strong {
-  color: #ffffff;
-  font-size: 20px;
-  letter-spacing: 0;
-}
-
-.hud-side-stat-right {
-  justify-items: end;
-}
-
 .hud-score-wrap {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  left: 16px;
+  width: 124px;
+  min-height: 88px;
   display: grid;
   justify-items: center;
-  gap: 2px;
+  align-content: center;
+  gap: 4px;
+  padding: 10px 8px;
+  border-radius: 20px;
+  background: var(--hud-panel);
 }
 
 .hud-score-label {
   font-size: 11px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.76);
+  color: var(--hud-text-soft);
 }
 
 .hud-score {
-  font-size: 40px;
+  font-size: 44px;
   font-weight: 700;
   line-height: 1;
   color: #ffffff;
   text-shadow: 0 0 24px rgba(255, 255, 255, 0.12);
+}
+
+.hud-stats {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  width: min(calc(100% - 32px), 560px);
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 10px;
+  border-radius: 22px;
+  background: var(--hud-panel-soft);
+}
+
+.hud-side-stat {
+  display: grid;
+  gap: 3px;
+  justify-items: center;
+  color: var(--hud-text-soft);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.hud-side-stat strong {
+  color: #ffffff;
+  font-size: 22px;
+  letter-spacing: 0;
 }
 
 .hud-banner {
@@ -151,16 +165,15 @@ body {
   left: 50%;
   bottom: 18px;
   transform: translateX(-50%);
-  min-width: min(80%, 480px);
+  width: min(calc(100% - 32px), 560px);
+  min-height: 58px;
   padding: 14px 20px;
   border-radius: 999px;
   text-align: center;
   font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.04em;
-  background: rgba(13, 44, 24, 0.8);
-  border: 1px solid rgba(154, 202, 234, 0.2);
-  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.24);
+  background: rgba(10, 33, 20, 0.82);
 }
 
 .hud-banner.is-good {
@@ -179,95 +192,59 @@ body {
   color: #ffffff;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 760px) {
   .app-shell {
-    width: 100vw;
     min-height: 100svh;
-    place-items: start center;
-    padding: 0 0 max(4px, env(safe-area-inset-bottom));
+    padding: 0;
   }
 
   .play-surface {
-    width: 100%;
+    width: min(100vw, calc(100svh * 990 / 1600));
   }
 
   .game-frame {
-    width: 100vw;
-    height: 78svh;
-    aspect-ratio: auto;
     border-radius: 0;
     border-left: 0;
     border-right: 0;
   }
 
-  .hud-root {
-    position: absolute;
-    inset: 0;
-  }
-
-  .hud-topbar {
-    top: max(8px, env(safe-area-inset-top));
-    width: calc(100% - 12px);
-    padding: 8px 12px;
-    border-radius: 15px;
+  .hud-score-wrap {
+    top: max(10px, env(safe-area-inset-top));
+    left: 10px;
+    width: 110px;
+    min-height: 80px;
+    padding: 8px 6px;
+    border-radius: 18px;
   }
 
   .hud-score {
-    font-size: 30px;
-  }
-
-  .hud-side-stat {
-    font-size: 10px;
-  }
-
-  .hud-side-stat strong {
-    font-size: 17px;
-  }
-
-  .hud-banner {
-    left: 50%;
-    right: auto;
-    bottom: -84px;
-    width: calc(100% - 12px);
-    min-width: 0;
-    padding: 10px 12px;
-    border-radius: 14px;
-    font-size: 12px;
-  }
-}
-
-@media (max-width: 520px) {
-  .app-shell {
-    width: 100vw;
-  }
-
-  .game-frame {
-    height: 80svh;
-    border-radius: 0;
-  }
-
-  .hud-topbar {
-    grid-template-columns: 0.9fr auto 0.9fr;
-    gap: 6px;
-    width: calc(100% - 6px);
-    padding: 7px 10px;
-  }
-
-  .hud-score {
-    font-size: 26px;
+    font-size: 34px;
   }
 
   .hud-score-label,
   .hud-side-stat {
-    font-size: 9px;
+    font-size: 10px;
+  }
+
+  .hud-stats {
+    bottom: 10px;
+    width: calc(100% - 20px);
+    gap: 4px;
+    padding: 8px 6px;
+    border-radius: 18px;
   }
 
   .hud-side-stat strong {
-    font-size: 15px;
+    font-size: 18px;
+  }
+}
+
+@media (max-width: 420px) {
+  .hud-score-wrap {
+    width: 102px;
   }
 
-  .hud-banner {
-    bottom: -92px;
-    font-size: 12px;
+  .hud-side-stat strong {
+    font-size: 16px;
   }
 }

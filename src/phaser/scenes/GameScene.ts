@@ -1,5 +1,5 @@
 import Phaser from "phaser";
-import { ConveyorSortGame, type GameEvent, type GameSnapshot, type ZoneLayout } from "../../game/simulation/gameModel";
+import { ConveyorSortGame, type GameEvent, type GameSnapshot, type GestureIntent, type ZoneLayout } from "../../game/simulation/gameModel";
 import type { Suit } from "../../game/simulation/cards";
 import { CardView } from "../view/CardView";
 import type { HudController } from "../../ui/hud";
@@ -23,11 +23,24 @@ interface ZoneVisual {
   glow: Phaser.GameObjects.Rectangle;
   body: Phaser.GameObjects.Rectangle;
   halo: Phaser.GameObjects.Text;
-  label: Phaser.GameObjects.Text;
-  suit: Phaser.GameObjects.Text;
+}
+
+interface CardInteractionState {
+  downPoint: {
+    x: number;
+    y: number;
+  };
+  downTime: number;
+  dragStarted: boolean;
 }
 
 export class GameScene extends Phaser.Scene {
+  private static readonly DOUBLE_TAP_WINDOW_MS = 280;
+  private static readonly DOUBLE_TAP_MAX_TRAVEL = 18;
+  private static readonly PRESS_TO_DRAG_DELAY_MS = 100;
+  private static readonly MIN_SWIPE_DISTANCE = 72;
+  private static readonly DIRECTION_CONFIDENCE_RATIO = 1.2;
+
   private readonly model: ConveyorSortGame;
   private readonly hud: HudController;
 
@@ -35,7 +48,11 @@ export class GameScene extends Phaser.Scene {
   private beltFx!: Phaser.GameObjects.Graphics;
   private zoneVisuals = new Map<string, ZoneVisual>();
   private cardViews = new Map<number, CardView>();
+  private interactionStates = new Map<number, CardInteractionState>();
   private matchTime = 0;
+  private lastTapCardId: number | null = null;
+  private lastTapTime = 0;
+  private previewIntent: GestureIntent | null = null;
 
   constructor(model: ConveyorSortGame, hud: HudController) {
     super("conveyor-sort");
@@ -48,11 +65,15 @@ export class GameScene extends Phaser.Scene {
     this.matchTime = 0;
     this.cardViews.clear();
     this.zoneVisuals.clear();
+    this.interactionStates.clear();
+    this.lastTapCardId = null;
+    this.lastTapTime = 0;
+    this.previewIntent = null;
 
     this.cameras.main.setBackgroundColor("#1d5a34");
     this.input.setTopOnly(true);
-    this.input.dragDistanceThreshold = 0;
-    this.input.dragTimeThreshold = 0;
+    this.input.dragDistanceThreshold = GameScene.DOUBLE_TAP_MAX_TRAVEL;
+    this.input.dragTimeThreshold = GameScene.PRESS_TO_DRAG_DELAY_MS;
     this.input.addPointer(2);
 
     this.backdrop = this.add.graphics().setDepth(0);
@@ -60,13 +81,38 @@ export class GameScene extends Phaser.Scene {
     this.drawBackdrop();
 
     const initial = this.model.getSnapshot();
-    this.createTunnel(initial);
+    this.createBeltHardware(initial);
     this.createZones(initial.zones);
+
+    this.input.on("gameobjectdown", (pointer: Phaser.Input.Pointer, gameObject: Phaser.GameObjects.GameObject) => {
+      if (!(gameObject instanceof CardView)) {
+        return;
+      }
+
+      this.interactionStates.set(gameObject.cardId, {
+        downPoint: { x: pointer.worldX, y: pointer.worldY },
+        downTime: pointer.downTime,
+        dragStarted: false
+      });
+    });
 
     this.input.on("dragstart", (_pointer: Phaser.Input.Pointer, gameObject: Phaser.GameObjects.GameObject) => {
       if (!(gameObject instanceof CardView)) {
         return;
       }
+
+      const state = this.interactionStates.get(gameObject.cardId);
+      if (state) {
+        state.dragStarted = true;
+      } else {
+        this.interactionStates.set(gameObject.cardId, {
+          downPoint: { x: gameObject.x, y: gameObject.y },
+          downTime: this.time.now,
+          dragStarted: true
+        });
+      }
+
+      this.previewIntent = null;
       this.model.startDrag(gameObject.cardId, { x: gameObject.x, y: gameObject.y });
     });
 
@@ -76,6 +122,11 @@ export class GameScene extends Phaser.Scene {
         if (!(gameObject instanceof CardView)) {
           return;
         }
+
+        const state = this.interactionStates.get(gameObject.cardId);
+        this.previewIntent = state
+          ? this.classifyGestureIntent(state.downPoint, { x: pointer.worldX, y: pointer.worldY })
+          : null;
         this.model.moveDrag(gameObject.cardId, { x: pointer.worldX, y: pointer.worldY });
       }
     );
@@ -86,7 +137,62 @@ export class GameScene extends Phaser.Scene {
         if (!(gameObject instanceof CardView)) {
           return;
         }
-        this.model.endDrag(gameObject.cardId, { x: pointer.worldX, y: pointer.worldY });
+
+        const state = this.interactionStates.get(gameObject.cardId);
+        const intent = state
+          ? this.classifyGestureIntent(state.downPoint, { x: pointer.worldX, y: pointer.worldY })
+          : "none";
+
+        this.model.resolveGesture(gameObject.cardId, intent);
+        this.interactionStates.delete(gameObject.cardId);
+        this.previewIntent = null;
+        this.lastTapCardId = null;
+        this.lastTapTime = 0;
+      }
+    );
+
+    this.input.on(
+      "gameobjectup",
+      (pointer: Phaser.Input.Pointer, gameObject: Phaser.GameObjects.GameObject) => {
+        if (!(gameObject instanceof CardView)) {
+          return;
+        }
+
+        const state = this.interactionStates.get(gameObject.cardId);
+        if (!state) {
+          return;
+        }
+
+        if (state.dragStarted) {
+          this.interactionStates.delete(gameObject.cardId);
+          this.previewIntent = null;
+          this.lastTapCardId = null;
+          this.lastTapTime = 0;
+          return;
+        }
+
+        const tapTravel = Math.hypot(pointer.worldX - state.downPoint.x, pointer.worldY - state.downPoint.y);
+        this.interactionStates.delete(gameObject.cardId);
+        if (tapTravel > GameScene.DOUBLE_TAP_MAX_TRAVEL) {
+          this.lastTapCardId = null;
+          this.lastTapTime = 0;
+          return;
+        }
+
+        const tappedTwice =
+          this.lastTapCardId === gameObject.cardId &&
+          pointer.upTime - this.lastTapTime <= GameScene.DOUBLE_TAP_WINDOW_MS;
+
+        this.lastTapCardId = gameObject.cardId;
+        this.lastTapTime = pointer.upTime;
+
+        if (!tappedTwice) {
+          return;
+        }
+
+        this.lastTapCardId = null;
+        this.lastTapTime = 0;
+        this.model.trashCard(gameObject.cardId);
       }
     );
 
@@ -134,53 +240,40 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private createTunnel(snapshot: GameSnapshot): void {
-    this.add.ellipse(snapshot.beltStart.x + 12, snapshot.beltStart.y + 4, 164, 104, 0x31424f, 0.92)
-      .setAngle(146)
+  private createBeltHardware(snapshot: GameSnapshot): void {
+    this.add.ellipse(snapshot.beltStart.x, snapshot.beltStart.y - 8, snapshot.beltWidth + 42, 152, 0x31424f, 0.94)
       .setDepth(18)
       .setStrokeStyle(8, 0x5d7687, 0.8);
 
-    this.add.ellipse(snapshot.beltStart.x + 4, snapshot.beltStart.y + 2, 118, 64, 0x060b11, 1)
-      .setAngle(146)
+    this.add.ellipse(snapshot.beltStart.x, snapshot.beltStart.y - 16, snapshot.beltWidth - 8, 108, 0x060b11, 1)
       .setDepth(19)
-      .setStrokeStyle(2, 0x6fc5ff, 0.14);
+      .setStrokeStyle(2, 0x6fc5ff, 0.16);
 
-    this.add.text(snapshot.beltStart.x - 62, snapshot.beltStart.y - 78, "FEEDER", {
-      color: "#ffffff",
-      fontFamily: "Trebuchet MS, sans-serif",
-      fontSize: "18px",
-      fontStyle: "bold"
-    }).setDepth(19).setAlpha(0.92);
+    this.add.rectangle(snapshot.beltEnd.x, snapshot.beltEnd.y + 20, snapshot.beltWidth + 50, 72, 0x280d12, 0.9)
+      .setDepth(18)
+      .setStrokeStyle(6, 0x6e2633, 0.8);
+
+    this.add.rectangle(snapshot.beltEnd.x, snapshot.beltEnd.y + 20, snapshot.beltWidth - 24, 38, 0x070b10, 1)
+      .setDepth(19)
+      .setStrokeStyle(2, 0xef8c9c, 0.16);
   }
 
   private createZones(zones: ZoneLayout[]): void {
     for (const zone of zones) {
-      const glow = this.add.rectangle(zone.center.x, zone.center.y, zone.width + 34, zone.height + 34, 0xffffff, 0.06).setDepth(40);
-      const body = this.add.rectangle(zone.center.x, zone.center.y, zone.width, zone.height, 0x0e3d23, 0.72).setDepth(41);
-      body.setStrokeStyle(3, 0xe9f4ea, 0.5);
+      const visibleWidth = zone.width * 0.78;
+      const visibleHeight = zone.height * 0.72;
+      const glow = this.add.rectangle(zone.center.x, zone.center.y, visibleWidth + 34, visibleHeight + 34, zone.accent, 0.1).setDepth(40);
+      const body = this.add.rectangle(zone.center.x, zone.center.y, visibleWidth, visibleHeight, 0x103723, 0.78).setDepth(41);
+      body.setStrokeStyle(4, zone.accent, 0.72);
 
-      const halo = this.add.text(zone.center.x, zone.center.y - 22, SUIT_SYMBOLS[zone.suit], {
+      const halo = this.add.text(zone.center.x, zone.center.y - 4, SUIT_SYMBOLS[zone.suit], {
         color: SUIT_DISPLAY_COLORS[zone.suit],
         fontFamily: "Georgia, serif",
-        fontSize: "112px",
+        fontSize: "136px",
         fontStyle: "bold"
       }).setOrigin(0.5).setDepth(42).setAlpha(0.94);
 
-      const label = this.add.text(zone.center.x, zone.center.y + 56, zone.suit.toUpperCase(), {
-        color: "#ffffff",
-        fontFamily: "Trebuchet MS, sans-serif",
-        fontSize: "28px",
-        fontStyle: "bold"
-      }).setOrigin(0.5).setDepth(42);
-
-      const suit = this.add.text(zone.center.x, zone.center.y - 1, "", {
-        color: "#ffffff",
-        fontFamily: "Trebuchet MS, sans-serif",
-        fontSize: "1px",
-        fontStyle: "bold"
-      }).setOrigin(0.5).setDepth(42).setAlpha(0);
-
-      this.zoneVisuals.set(zone.id, { zone, glow, body, halo, label, suit });
+      this.zoneVisuals.set(zone.id, { zone, glow, body, halo });
     }
   }
 
@@ -229,7 +322,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.beltFx.fillStyle(0x4a1018, 0.55);
-    this.beltFx.fillCircle(snapshot.beltEnd.x - 12, snapshot.beltEnd.y + 8, 32);
+    this.beltFx.fillCircle(snapshot.beltEnd.x, snapshot.beltEnd.y + 20, 24);
   }
 
   private syncZones(snapshot: GameSnapshot): void {
@@ -238,11 +331,13 @@ export class GameScene extends Phaser.Scene {
       if (!visual) {
         continue;
       }
-      const isTarget = snapshot.activeDragSuit === zone.suit;
-      visual.glow.setAlpha(isTarget ? 0.2 : 0.06);
-      visual.halo.setAlpha(isTarget ? 1 : 0.94);
-      visual.body.setScale(isTarget ? 1.03 : 1);
-      visual.body.setFillStyle(isTarget ? 0x15592f : 0x0e3d23, isTarget ? 0.84 : 0.72);
+      const matchesSuit = snapshot.activeDragSuit === zone.suit;
+      const matchesGesture = this.previewIntent === zone.id;
+      const isHighlighted = matchesSuit || matchesGesture;
+      visual.glow.setAlpha(matchesGesture ? 0.32 : matchesSuit ? 0.26 : 0.1);
+      visual.halo.setAlpha(isHighlighted ? 1 : 0.94);
+      visual.body.setScale(matchesGesture ? 1.05 : matchesSuit ? 1.035 : 1);
+      visual.body.setFillStyle(isHighlighted ? 0x15592f : 0x103723, isHighlighted ? 0.88 : 0.78);
     }
   }
 
@@ -283,13 +378,13 @@ export class GameScene extends Phaser.Scene {
         zone.glow.setFillStyle(color, event.type === "sorted" ? 0.18 : 0.28);
         zone.body.setStrokeStyle(4, color, 0.85);
         this.tweens.add({
-          targets: [zone.glow, zone.halo, zone.label],
+          targets: [zone.glow, zone.halo],
           alpha: 0.44,
           duration: 110,
           yoyo: true,
           onComplete: () => {
-            zone.glow.setFillStyle(0xffffff, 0.06);
-            zone.body.setStrokeStyle(3, 0xe9f4ea, 0.5);
+            zone.glow.setFillStyle(zone.zone.accent, 0.1);
+            zone.body.setStrokeStyle(4, zone.zone.accent, 0.72);
           }
         });
       }
@@ -297,9 +392,9 @@ export class GameScene extends Phaser.Scene {
 
     if (view) {
       const destination = event.worldPoint;
-      const scale = event.type === "sorted" ? 0.72 : 0.9;
+      const scale = event.type === "sorted" ? 0.72 : event.type === "trash" ? 0.82 : 0.9;
       const angle = event.type === "mistake" ? 18 : 0;
-      const offsetY = event.type === "miss" ? 54 : 0;
+      const offsetY = event.type === "miss" || event.type === "trash" ? 54 : 0;
 
       this.tweens.add({
         targets: view,
@@ -313,6 +408,10 @@ export class GameScene extends Phaser.Scene {
         ease: "Cubic.easeIn",
         onComplete: () => view.destroy()
       });
+    }
+
+    if (event.type === "trash" || event.scoreDelta === 0) {
+      return;
     }
 
     const label = event.scoreDelta > 0 ? `+${event.scoreDelta}` : `${event.scoreDelta}`;
@@ -332,5 +431,31 @@ export class GameScene extends Phaser.Scene {
       ease: "Sine.easeOut",
       onComplete: () => scoreText.destroy()
     });
+  }
+
+  private classifyGestureIntent(
+    from: { x: number; y: number },
+    to: { x: number; y: number }
+  ): GestureIntent {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance < GameScene.MIN_SWIPE_DISTANCE) {
+      return "none";
+    }
+
+    const absDx = Math.abs(dx);
+    const absDy = Math.abs(dy);
+    const angleDegrees = Phaser.Math.RadToDeg(Math.atan2(dy, dx));
+
+    if (absDx >= absDy * GameScene.DIRECTION_CONFIDENCE_RATIO) {
+      return angleDegrees > 90 || angleDegrees < -90 ? "west" : "east";
+    }
+
+    if (absDy >= absDx * GameScene.DIRECTION_CONFIDENCE_RATIO) {
+      return "trash";
+    }
+
+    return "none";
   }
 }
