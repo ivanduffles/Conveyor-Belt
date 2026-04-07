@@ -25,19 +25,15 @@ interface ZoneVisual {
   halo: Phaser.GameObjects.Text;
 }
 
-interface CardInteractionState {
+interface ScreenGestureState {
+  pointerId: number;
   downPoint: {
     x: number;
     y: number;
   };
-  downTime: number;
-  dragStarted: boolean;
 }
 
 export class GameScene extends Phaser.Scene {
-  private static readonly DOUBLE_TAP_WINDOW_MS = 280;
-  private static readonly DOUBLE_TAP_MAX_TRAVEL = 18;
-  private static readonly PRESS_TO_DRAG_DELAY_MS = 100;
   private static readonly MIN_SWIPE_DISTANCE = 72;
   private static readonly DIRECTION_CONFIDENCE_RATIO = 1.2;
 
@@ -48,10 +44,8 @@ export class GameScene extends Phaser.Scene {
   private beltFx!: Phaser.GameObjects.Graphics;
   private zoneVisuals = new Map<string, ZoneVisual>();
   private cardViews = new Map<number, CardView>();
-  private interactionStates = new Map<number, CardInteractionState>();
+  private activeGesture: ScreenGestureState | null = null;
   private matchTime = 0;
-  private lastTapCardId: number | null = null;
-  private lastTapTime = 0;
   private previewIntent: GestureIntent | null = null;
 
   constructor(model: ConveyorSortGame, hud: HudController) {
@@ -65,15 +59,11 @@ export class GameScene extends Phaser.Scene {
     this.matchTime = 0;
     this.cardViews.clear();
     this.zoneVisuals.clear();
-    this.interactionStates.clear();
-    this.lastTapCardId = null;
-    this.lastTapTime = 0;
+    this.activeGesture = null;
     this.previewIntent = null;
 
     this.cameras.main.setBackgroundColor("#1d5a34");
     this.input.setTopOnly(true);
-    this.input.dragDistanceThreshold = GameScene.DOUBLE_TAP_MAX_TRAVEL;
-    this.input.dragTimeThreshold = GameScene.PRESS_TO_DRAG_DELAY_MS;
     this.input.addPointer(2);
 
     this.backdrop = this.add.graphics().setDepth(0);
@@ -84,117 +74,45 @@ export class GameScene extends Phaser.Scene {
     this.createBeltHardware(initial);
     this.createZones(initial.zones);
 
-    this.input.on("gameobjectdown", (pointer: Phaser.Input.Pointer, gameObject: Phaser.GameObjects.GameObject) => {
-      if (!(gameObject instanceof CardView)) {
+    this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      if (this.activeGesture) {
         return;
       }
 
-      this.interactionStates.set(gameObject.cardId, {
-        downPoint: { x: pointer.worldX, y: pointer.worldY },
-        downTime: pointer.downTime,
-        dragStarted: false
-      });
-    });
-
-    this.input.on("dragstart", (_pointer: Phaser.Input.Pointer, gameObject: Phaser.GameObjects.GameObject) => {
-      if (!(gameObject instanceof CardView)) {
+      const lockedCardId = this.model.startFrontCardGesture({ x: pointer.worldX, y: pointer.worldY });
+      if (lockedCardId === null) {
         return;
       }
 
-      const state = this.interactionStates.get(gameObject.cardId);
-      if (state) {
-        state.dragStarted = true;
-      } else {
-        this.interactionStates.set(gameObject.cardId, {
-          downPoint: { x: gameObject.x, y: gameObject.y },
-          downTime: this.time.now,
-          dragStarted: true
-        });
-      }
-
+      this.activeGesture = {
+        pointerId: pointer.id,
+        downPoint: { x: pointer.worldX, y: pointer.worldY }
+      };
       this.previewIntent = null;
-      this.model.startDrag(gameObject.cardId, { x: gameObject.x, y: gameObject.y });
     });
 
-    this.input.on(
-      "drag",
-      (pointer: Phaser.Input.Pointer, gameObject: Phaser.GameObjects.GameObject) => {
-        if (!(gameObject instanceof CardView)) {
-          return;
-        }
-
-        const state = this.interactionStates.get(gameObject.cardId);
-        this.previewIntent = state
-          ? this.classifyGestureIntent(state.downPoint, { x: pointer.worldX, y: pointer.worldY })
-          : null;
-        this.model.moveDrag(gameObject.cardId, { x: pointer.worldX, y: pointer.worldY });
+    this.input.on("pointermove", (pointer: Phaser.Input.Pointer) => {
+      if (!this.activeGesture || this.activeGesture.pointerId !== pointer.id) {
+        return;
       }
-    );
 
-    this.input.on(
-      "dragend",
-      (pointer: Phaser.Input.Pointer, gameObject: Phaser.GameObjects.GameObject) => {
-        if (!(gameObject instanceof CardView)) {
-          return;
-        }
+      this.previewIntent = this.classifyGestureIntent(this.activeGesture.downPoint, { x: pointer.worldX, y: pointer.worldY });
+      this.model.moveActiveGesture({ x: pointer.worldX, y: pointer.worldY });
+    });
 
-        const state = this.interactionStates.get(gameObject.cardId);
-        const intent = state
-          ? this.classifyGestureIntent(state.downPoint, { x: pointer.worldX, y: pointer.worldY })
-          : "none";
-
-        this.model.resolveGesture(gameObject.cardId, intent);
-        this.interactionStates.delete(gameObject.cardId);
-        this.previewIntent = null;
-        this.lastTapCardId = null;
-        this.lastTapTime = 0;
+    const finalizeGesture = (pointer: Phaser.Input.Pointer): void => {
+      if (!this.activeGesture || this.activeGesture.pointerId !== pointer.id) {
+        return;
       }
-    );
 
-    this.input.on(
-      "gameobjectup",
-      (pointer: Phaser.Input.Pointer, gameObject: Phaser.GameObjects.GameObject) => {
-        if (!(gameObject instanceof CardView)) {
-          return;
-        }
+      const intent = this.classifyGestureIntent(this.activeGesture.downPoint, { x: pointer.worldX, y: pointer.worldY });
+      this.model.resolveActiveGesture(intent);
+      this.activeGesture = null;
+      this.previewIntent = null;
+    };
 
-        const state = this.interactionStates.get(gameObject.cardId);
-        if (!state) {
-          return;
-        }
-
-        if (state.dragStarted) {
-          this.interactionStates.delete(gameObject.cardId);
-          this.previewIntent = null;
-          this.lastTapCardId = null;
-          this.lastTapTime = 0;
-          return;
-        }
-
-        const tapTravel = Math.hypot(pointer.worldX - state.downPoint.x, pointer.worldY - state.downPoint.y);
-        this.interactionStates.delete(gameObject.cardId);
-        if (tapTravel > GameScene.DOUBLE_TAP_MAX_TRAVEL) {
-          this.lastTapCardId = null;
-          this.lastTapTime = 0;
-          return;
-        }
-
-        const tappedTwice =
-          this.lastTapCardId === gameObject.cardId &&
-          pointer.upTime - this.lastTapTime <= GameScene.DOUBLE_TAP_WINDOW_MS;
-
-        this.lastTapCardId = gameObject.cardId;
-        this.lastTapTime = pointer.upTime;
-
-        if (!tappedTwice) {
-          return;
-        }
-
-        this.lastTapCardId = null;
-        this.lastTapTime = 0;
-        this.model.trashCard(gameObject.cardId);
-      }
-    );
+    this.input.on("pointerup", finalizeGesture);
+    this.input.on("pointerupoutside", finalizeGesture);
 
     this.input.keyboard?.on("keydown-R", () => {
       this.scene.restart();
@@ -353,7 +271,6 @@ export class GameScene extends Phaser.Scene {
 
       const view = new CardView(this, card);
       this.cardViews.set(card.id, view);
-      this.input.setDraggable(view);
     }
 
     for (const [cardId, view] of this.cardViews.entries()) {

@@ -63,20 +63,22 @@ interface ActiveCard extends DeckCard {
   wobblePhase: number;
   dragging: boolean;
   dragPosition: Point | null;
+  dragOrigin: Point | null;
+  dragStartPointer: Point | null;
 }
 
 const CARD_LIMIT = 8;
-const BASE_BELT_SPEED = 72;
-const MAX_BELT_SPEED = BASE_BELT_SPEED * 4;
+const BASE_BELT_SPEED = 100;
+const MAX_BELT_SPEED = 500;
 const SPEED_STEP_INTERVAL_SECONDS = 10;
-const SPEED_STEP_MULTIPLIER = 0.07;
+const SPEED_STEP_MULTIPLIER = 0.1;
 const MISS_PENALTY = -25;
 const MISTAKE_PENALTY = -65;
-const SORT_POINTS = 110;
+const SORT_POINTS = 10;
 const INTRA_BATCH_SPACING_PIXELS = 175;
-const INTER_BATCH_MIN_FRACTION = 0.16;
-const INTER_BATCH_MAX_FRACTION = 0.26;
-const BATCH_LENGTH_DELAY_RATIO = 0.35;
+const INTER_BATCH_MIN_FRACTION = 0.06;
+const INTER_BATCH_MAX_FRACTION = 0.16;
+const BATCH_LENGTH_DELAY_RATIO = 0.25;
 const BATCH_MEAN = 4;
 const BATCH_STD_DEV = 1.45;
 const BATCH_SIZES = [1, 2, 3, 4, 5, 6, 7, 8] as const;
@@ -214,66 +216,69 @@ export class ConveyorSortGame {
     }
   }
 
-  startDrag(cardId: number, pointer: Point): void {
-    const card = this.activeCards.get(cardId);
+  startFrontCardGesture(pointer: Point): number | null {
+    const card = this.getFrontCard();
     if (!card) {
-      return;
+      return null;
     }
 
+    const currentPosition = this.getRenderedCardPosition(card);
     card.dragging = true;
-    card.dragPosition = { ...pointer };
+    card.dragOrigin = currentPosition;
+    card.dragStartPointer = { ...pointer };
+    card.dragPosition = currentPosition;
     this.draggingCardId = card.id;
+    return card.id;
   }
 
-  moveDrag(cardId: number, pointer: Point): void {
-    const card = this.activeCards.get(cardId);
-    if (!card || !card.dragging) {
+  moveActiveGesture(pointer: Point): void {
+    const card = this.getDraggingCard();
+    if (!card || !card.dragOrigin || !card.dragStartPointer) {
       return;
     }
 
-    card.dragPosition = { ...pointer };
+    const dx = pointer.x - card.dragStartPointer.x;
+    const dy = pointer.y - card.dragStartPointer.y;
+    card.dragPosition = {
+      x: card.dragOrigin.x + dx,
+      y: card.dragOrigin.y + dy
+    };
   }
 
-  cancelDrag(cardId: number): void {
-    const card = this.activeCards.get(cardId);
+  cancelActiveGesture(): void {
+    const card = this.getDraggingCard();
     if (!card) {
       return;
     }
 
-    card.dragging = false;
-    card.dragPosition = null;
-    if (this.draggingCardId === card.id) {
-      this.draggingCardId = null;
-    }
+    this.clearDraggingState(card);
   }
 
-  resolveGesture(cardId: number, intent: GestureIntent): void {
+  resolveActiveGesture(intent: GestureIntent): void {
+    const card = this.getDraggingCard();
     if (intent === "none") {
-      this.cancelDrag(cardId);
+      this.cancelActiveGesture();
       return;
     }
 
     if (intent === "trash") {
-      this.trashCard(cardId);
+      this.trashActiveCard();
       return;
     }
 
-    const card = this.activeCards.get(cardId);
     const dropZone = this.getZoneById(intent);
     if (!card || !dropZone) {
       return;
     }
 
-    card.dragging = false;
-    card.dragPosition = null;
-    this.draggingCardId = null;
+    this.clearDraggingState(card);
     this.activeCards.delete(card.id);
     const dropPoint = { ...dropZone.center };
 
     if (dropZone.suit === card.suit) {
       this.sorted += 1;
       this.streak += 1;
-      const comboBonus = Math.min(this.streak - 1, 6) * 10;
+      const comboBonus = Math.min(this.streak - 1, 10) * 10;
       const scoreDelta = SORT_POINTS + comboBonus;
       this.score += scoreDelta;
       this.events.push({
@@ -300,16 +305,14 @@ export class ConveyorSortGame {
     this.setBanner("Wrong chute.", "bad", 1.15);
   }
 
-  trashCard(cardId: number): void {
-    const card = this.activeCards.get(cardId);
+  trashActiveCard(): void {
+    const card = this.getDraggingCard();
     if (!card) {
       return;
     }
 
+    this.clearDraggingState(card);
     this.activeCards.delete(card.id);
-    if (this.draggingCardId === card.id) {
-      this.draggingCardId = null;
-    }
 
     if (this.enabledSuits.includes(card.suit)) {
       this.streak = 0;
@@ -377,7 +380,7 @@ export class ConveyorSortGame {
 
   private getBeltPixelsPerSecond(): number {
     const speedSteps = Math.floor(this.elapsedSeconds / SPEED_STEP_INTERVAL_SECONDS);
-    const multiplier = Math.min(4, (1 + SPEED_STEP_MULTIPLIER) ** speedSteps);
+    const multiplier = Math.min(MAX_BELT_SPEED / BASE_BELT_SPEED, (1 + SPEED_STEP_MULTIPLIER) ** speedSteps);
     return Math.min(MAX_BELT_SPEED, BASE_BELT_SPEED * multiplier);
   }
 
@@ -424,7 +427,9 @@ export class ConveyorSortGame {
       laneOffset: -22 + Math.random() * 44,
       wobblePhase: Math.random() * Math.PI * 2,
       dragging: false,
-      dragPosition: null
+      dragPosition: null,
+      dragOrigin: null,
+      dragStartPointer: null
     });
 
     this.nextCardId += 1;
@@ -475,10 +480,9 @@ export class ConveyorSortGame {
   }
 
   private buildRenderCard(card: ActiveCard): CardRenderState {
-    const beltPoint = this.getBeltPoint(card.progress, card.laneOffset);
-    const wobble = Math.sin(this.elapsedSeconds * 3.3 + card.wobblePhase) * 4;
-    const x = card.dragging && card.dragPosition ? card.dragPosition.x : beltPoint.x;
-    const y = card.dragging && card.dragPosition ? card.dragPosition.y : beltPoint.y + wobble;
+    const renderedPosition = this.getRenderedCardPosition(card);
+    const x = card.dragging && card.dragPosition ? card.dragPosition.x : renderedPosition.x;
+    const y = card.dragging && card.dragPosition ? card.dragPosition.y : renderedPosition.y;
     const rotation = card.dragging ? 0 : -0.18 + Math.sin(this.elapsedSeconds * 4.5 + card.wobblePhase) * 0.035;
 
     return {
@@ -502,6 +506,46 @@ export class ConveyorSortGame {
     return {
       x: alongX + normal.x * laneOffset,
       y: alongY + normal.y * laneOffset
+    };
+  }
+
+  private getFrontCard(): ActiveCard | null {
+    let frontCard: ActiveCard | null = null;
+
+    for (const card of this.activeCards.values()) {
+      if (!frontCard || card.progress > frontCard.progress) {
+        frontCard = card;
+      }
+    }
+
+    return frontCard;
+  }
+
+  private getDraggingCard(): ActiveCard | null {
+    if (this.draggingCardId === null) {
+      return null;
+    }
+
+    return this.activeCards.get(this.draggingCardId) ?? null;
+  }
+
+  private clearDraggingState(card: ActiveCard): void {
+    card.dragging = false;
+    card.dragPosition = null;
+    card.dragOrigin = null;
+    card.dragStartPointer = null;
+
+    if (this.draggingCardId === card.id) {
+      this.draggingCardId = null;
+    }
+  }
+
+  private getRenderedCardPosition(card: ActiveCard): Point {
+    const beltPoint = this.getBeltPoint(card.progress, card.laneOffset);
+    const wobble = Math.sin(this.elapsedSeconds * 3.3 + card.wobblePhase) * 4;
+    return {
+      x: beltPoint.x,
+      y: beltPoint.y + wobble
     };
   }
 

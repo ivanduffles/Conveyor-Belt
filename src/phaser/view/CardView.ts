@@ -24,8 +24,6 @@ export class CardView extends Phaser.GameObjects.Container {
   private readonly outline: Phaser.GameObjects.Rectangle;
   private static readonly CARD_WIDTH = 147;
   private static readonly CARD_HEIGHT = 208;
-  private static readonly HIT_HALF_WIDTH = 101;
-  private static readonly HIT_HALF_HEIGHT = 129;
 
   constructor(scene: Phaser.Scene, card: CardRenderState) {
     super(scene, card.x, card.y);
@@ -83,31 +81,6 @@ export class CardView extends Phaser.GameObjects.Container {
       bottomSuit
     ]);
 
-    this.setSize(CardView.HIT_HALF_WIDTH * 2, CardView.HIT_HALF_HEIGHT * 2);
-    this.setInteractive(
-      new Phaser.Geom.Rectangle(
-        -CardView.HIT_HALF_WIDTH,
-        -CardView.HIT_HALF_HEIGHT,
-        CardView.HIT_HALF_WIDTH * 2,
-        CardView.HIT_HALF_HEIGHT * 2
-      ),
-      (_area, x, y) => {
-        const centered =
-          x >= -CardView.HIT_HALF_WIDTH &&
-          x <= CardView.HIT_HALF_WIDTH &&
-          y >= -CardView.HIT_HALF_HEIGHT &&
-          y <= CardView.HIT_HALF_HEIGHT;
-
-        const topLeft =
-          x >= 0 &&
-          x <= CardView.HIT_HALF_WIDTH * 2 &&
-          y >= 0 &&
-          y <= CardView.HIT_HALF_HEIGHT * 2;
-
-        return centered || topLeft;
-      }
-    );
-    this.input!.cursor = "grab";
     scene.add.existing(this);
     this.refresh(card, true);
   }
